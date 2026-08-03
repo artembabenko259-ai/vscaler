@@ -5,16 +5,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-type ProgressCallback func(percent float64, step string)
-
-type UpscaleOptions struct {
-	TargetPath string  // Can be a folder or a single video file
-	Scale      int     // 2x, 4x
-	ModelName  string  // realesrgan-x4plus, realesr-animevideov3
-	TargetFPS  float64 // 0 = original, 60 = 60fps
+type BatchProgress struct {
+	CurrentFileIdx int
+	TotalFiles     int
+	CurrentFile    string
+	Percent        float64
+	Elapsed        time.Duration
+	ETA            time.Duration
+	StatusMsg      string
 }
+
+type BatchCallback func(progress BatchProgress)
 
 type Processor struct {
 	downloader *Downloader
@@ -30,22 +34,16 @@ func NewProcessor() *Processor {
 	}
 }
 
-func isVideoFile(ext string) bool {
-	ext = strings.ToLower(ext)
-	videoExts := map[string]bool{
-		".mp4": true, ".mkv": true, ".mov": true, ".avi": true,
-		".webm": true, ".flv": true, ".wmv": true, ".m4v": true,
-		".3gp": true,
-	}
-	return videoExts[ext]
-}
-
-func (p *Processor) ProcessPath(opts UpscaleOptions, callback ProgressCallback) (string, error) {
+func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (string, error) {
 	if !p.ffmpeg.IsInstalled() {
 		return "", fmt.Errorf("FFmpeg is not installed in PATH")
 	}
 
-	if err := p.downloader.EnsureEngineInstalled(callback); err != nil {
+	if err := p.downloader.EnsureEngineInstalled(func(pct float64, msg string) {
+		if callback != nil {
+			callback(BatchProgress{Percent: pct, StatusMsg: msg})
+		}
+	}); err != nil {
 		return "", fmt.Errorf("failed to initialize AI engine: %v", err)
 	}
 
@@ -80,31 +78,64 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback ProgressCallback) 
 		return "", err
 	}
 
-	total := len(videoFiles)
+	totalFiles := len(videoFiles)
+	batchStartTime := time.Now()
+
 	for i, videoPath := range videoFiles {
 		baseName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
 		outVideo := filepath.Join(baseOutputDir, fmt.Sprintf("%s_4K_%dx.mp4", baseName, opts.Scale))
 
-		pct := float64(i) / float64(total) * 100.0
-		if callback != nil {
-			callback(pct, fmt.Sprintf("[%d/%d] High-Speed AI Upscaling %s...", i+1, total, filepath.Base(videoPath)))
-		}
+		fileStartTime := time.Now()
 
-		err := p.upscaler.UpscaleStream(videoPath, outVideo, opts.Scale, opts.ModelName, opts.TargetFPS, callback)
+		err := p.upscaler.UpscaleStreamWithProgress(videoPath, outVideo, opts.Scale, opts.ModelName, opts.TargetFPS, func(pInfo ProgressInfo) {
+			if callback != nil {
+				// Calculate overall batch ETA
+				elapsed := time.Since(batchStartTime)
+				fileElapsed := time.Since(fileStartTime)
+
+				callback(BatchProgress{
+					CurrentFileIdx: i + 1,
+					TotalFiles:     totalFiles,
+					CurrentFile:    filepath.Base(videoPath),
+					Percent:        pInfo.Percent,
+					Elapsed:        fileElapsed,
+					ETA:            pInfo.ETA,
+					StatusMsg:      fmt.Sprintf("Processing %s (%d/%d)...", filepath.Base(videoPath), i+1, totalFiles),
+				})
+			}
+		})
+
 		if err != nil {
-			// Fallback to frame pipeline if direct stream encountered format restriction
-			_, _ = p.processFrameFallback(videoPath, baseOutputDir, opts, baseName, callback)
+			_, _ = p.processFrameFallback(videoPath, baseOutputDir, opts, baseName, func(pInfo ProgressInfo) {
+				if callback != nil {
+					callback(BatchProgress{
+						CurrentFileIdx: i + 1,
+						TotalFiles:     totalFiles,
+						CurrentFile:    filepath.Base(videoPath),
+						Percent:        pInfo.Percent,
+						Elapsed:        time.Since(fileStartTime),
+						ETA:            pInfo.ETA,
+						StatusMsg:      fmt.Sprintf("Fallback Processing %s (%d/%d)...", filepath.Base(videoPath), i+1, totalFiles),
+					})
+				}
+			})
 		}
+		_ = batchStartTime
 	}
 
 	if callback != nil {
-		callback(100.0, fmt.Sprintf("DONE! All %d upscaled videos saved to %s", total, baseOutputDir))
+		callback(BatchProgress{
+			CurrentFileIdx: totalFiles,
+			TotalFiles:     totalFiles,
+			Percent:        100.0,
+			StatusMsg:      fmt.Sprintf("DONE! All %d upscaled videos saved to %s", totalFiles, baseOutputDir),
+		})
 	}
 
 	return baseOutputDir, nil
 }
 
-func (p *Processor) processFrameFallback(videoPath, baseOutputDir string, opts UpscaleOptions, baseName string, callback ProgressCallback) (string, error) {
+func (p *Processor) processFrameFallback(videoPath, baseOutputDir string, opts UpscaleOptions, baseName string, callback func(pInfo ProgressInfo)) (string, error) {
 	tempDir := filepath.Join(baseOutputDir, baseName+"_vscaler_temp")
 	inputFrames := filepath.Join(tempDir, "in")
 	outputFrames := filepath.Join(tempDir, "out")

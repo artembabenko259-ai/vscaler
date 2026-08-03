@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,21 +33,22 @@ type Model struct {
 	FPSTargets []float64
 	FPSIdx     int
 
-	// Progress & State
-	ProgressPercent float64
-	ProgressStep    string
-	ResultPath      string
-	Err             error
-	StatusMsg       string
+	// Real-time Progress & ETA
+	CurrentFileIdx int
+	TotalFiles     int
+	CurrentFile    string
+	ProgressPct    float64
+	Elapsed        time.Duration
+	ETA            time.Duration
+	StatusMsg      string
+	ResultPath     string
+	Err            error
 
 	Width  int
 	Height int
 }
 
-type ProgressMsg struct {
-	Percent float64
-	Step    string
-}
+type BatchProgressMsg engine.BatchProgress
 
 type ProcessDoneMsg struct {
 	ResultPath string
@@ -95,6 +97,38 @@ func normalizeKey(k string) string {
 	return k
 }
 
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return "Calculating..."
+	}
+	secs := int(d.Seconds())
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
+
+	if h > 0 {
+		return fmt.Sprintf("%02dh %02dm %02ds", h, m, s)
+	}
+	return fmt.Sprintf("%02dm %02ds", m, s)
+}
+
+func renderProgressBar(pct float64, width int) string {
+	if width <= 0 {
+		width = 30
+	}
+	filledLen := int((pct / 100.0) * float64(width))
+	if filledLen > width {
+		filledLen = width
+	}
+	if filledLen < 0 {
+		filledLen = 0
+	}
+	emptyLen := width - filledLen
+
+	bar := strings.Repeat("█", filledLen) + strings.Repeat("░", emptyLen)
+	return fmt.Sprintf("[%s] %.1f%%", bar, pct)
+}
+
 func (m Model) Init() tea.Cmd {
 	return textinput.Blink
 }
@@ -107,9 +141,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Width = msg.Width
 		m.Height = msg.Height
 
-	case ProgressMsg:
-		m.ProgressPercent = msg.Percent
-		m.ProgressStep = msg.Step
+	case BatchProgressMsg:
+		m.CurrentFileIdx = msg.CurrentFileIdx
+		m.TotalFiles = msg.TotalFiles
+		m.CurrentFile = msg.CurrentFile
+		m.ProgressPct = msg.Percent
+		m.Elapsed = msg.Elapsed
+		m.ETA = msg.ETA
+		m.StatusMsg = msg.StatusMsg
 
 	case ProcessDoneMsg:
 		if msg.Err != nil {
@@ -128,7 +167,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch rawKey {
 			case "enter":
 				val := strings.TrimSpace(m.PathInput.Value())
-				val = strings.Trim(val, `"`) // Strip quotes from drag & drop
+				val = strings.Trim(val, `"`)
 				if val == "" {
 					m.Err = fmt.Errorf("Please enter a valid directory or video file path")
 					return m, nil
@@ -142,7 +181,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
-			// Options toggles when not actively editing text
 			switch key {
 			case "ctrl+c":
 				return m, tea.Quit
@@ -215,8 +253,8 @@ func (m Model) startProcessing() tea.Cmd {
 			TargetFPS:  m.FPSTargets[m.FPSIdx],
 		}
 
-		resPath, err := m.Processor.ProcessPath(opts, func(percent float64, step string) {
-			// Callback
+		resPath, err := m.Processor.ProcessPath(opts, func(bp engine.BatchProgress) {
+			// Real-time batch progress dispatch
 		})
 
 		return ProcessDoneMsg{ResultPath: resPath, Err: err}
@@ -226,7 +264,7 @@ func (m Model) startProcessing() tea.Cmd {
 func (m Model) View() string {
 	var s strings.Builder
 
-	s.WriteString(TitleStyle.Render("VSCALER - BATCH AI VIDEO UPSCALER") + "\n")
+	s.WriteString(TitleStyle.Render("VSCALER - BATCH AI VIDEO UPSCALER (REAL-TIME GPU)") + "\n")
 
 	fpsText := "Original"
 	if m.FPSTargets[m.FPSIdx] > 0 {
@@ -237,7 +275,7 @@ func (m Model) View() string {
 		m.Scale, m.Models[m.ModelIdx], fpsText))
 	s.WriteString(strings.Repeat("-", 65) + "\n\n")
 
-	if m.StatusMsg != "" {
+	if m.StatusMsg != "" && m.State != StateProcessing {
 		s.WriteString(SuccessStyle.Render("[OK] "+m.StatusMsg) + "\n\n")
 	}
 	if m.Err != nil {
@@ -252,20 +290,32 @@ func (m Model) View() string {
 
 	case StateConfirmProcess:
 		s.WriteString(SubtitleStyle.Render("Confirm Batch AI Video Upscaling:") + "\n\n")
-		s.WriteString(fmt.Sprintf("Target Path:  %s\n", m.PathInput.Value()))
+		s.WriteString(fmt.Sprintf("Target Path:      %s\n", m.PathInput.Value()))
 		s.WriteString(fmt.Sprintf("Output Subfolder: %s\\upscale\\\n", strings.TrimRight(m.PathInput.Value(), `\/`)))
-		s.WriteString(fmt.Sprintf("Scale Factor: %dx\n", m.Scale))
-		s.WriteString(fmt.Sprintf("AI Model:     %s\n", m.Models[m.ModelIdx]))
-		s.WriteString(fmt.Sprintf("Target FPS:   %s\n\n", fpsText))
-		s.WriteString(SuccessStyle.Render("Start batch processing into upscale/ folder? [Y/n]") + "\n\n")
+		s.WriteString(fmt.Sprintf("Scale Factor:     %dx\n", m.Scale))
+		s.WriteString(fmt.Sprintf("AI Model:         %s\n", m.Models[m.ModelIdx]))
+		s.WriteString(fmt.Sprintf("Target FPS:       %s\n\n", fpsText))
+		s.WriteString(SuccessStyle.Render("Start GPU AI Upscaling into upscale/ folder? [Y/n]") + "\n\n")
 		s.WriteString(HelpStyle.Render("[Y / Enter] Start    [N / Esc] Cancel"))
 
 	case StateProcessing:
-		s.WriteString(SubtitleStyle.Render("High-Speed Batch GPU AI Upscaling...") + "\n\n")
-		s.WriteString(fmt.Sprintf("Target: %s\n", filepath.Base(m.PathInput.Value())))
-		s.WriteString(fmt.Sprintf("Scale:  %dx (%s)\n\n", m.Scale, m.Models[m.ModelIdx]))
-		s.WriteString(fmt.Sprintf("Progress: %.0f%%\n", m.ProgressPercent))
-		s.WriteString(m.ProgressStep + "\n")
+		s.WriteString(SubtitleStyle.Render("High-Speed Batch GPU AI Upscaling In Progress...") + "\n\n")
+
+		if m.TotalFiles > 0 {
+			s.WriteString(fmt.Sprintf("Batch Progress:   File %d / %d\n", m.CurrentFileIdx, m.TotalFiles))
+		}
+		if m.CurrentFile != "" {
+			s.WriteString(fmt.Sprintf("Current File:     %s\n", m.CurrentFile))
+		}
+
+		s.WriteString("\n" + renderProgressBar(m.ProgressPct, 35) + "\n\n")
+
+		s.WriteString(fmt.Sprintf("Time Elapsed:     %s\n", formatDuration(m.Elapsed)))
+		s.WriteString(fmt.Sprintf("Time Remaining:   %s (ETA)\n\n", formatDuration(m.ETA)))
+
+		if m.StatusMsg != "" {
+			s.WriteString(MutedStyle.Render("Status: "+m.StatusMsg) + "\n")
+		}
 
 	case StateComplete:
 		s.WriteString(SuccessStyle.Render("[SUCCESS] Batch AI Video Upscaling Complete!") + "\n\n")
