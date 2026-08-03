@@ -55,7 +55,12 @@ type ProcessDoneMsg struct {
 	Err        error
 }
 
+// Thoroughly clean and normalize pasted Windows paths (strip newlines, quotes, control chars, and backslashes)
 func cleanInputPath(p string) string {
+	p = strings.ReplaceAll(p, "\r", "")
+	p = strings.ReplaceAll(p, "\n", "")
+	p = strings.ReplaceAll(p, "\t", "")
+	p = strings.ReplaceAll(p, "\x00", "")
 	p = strings.TrimSpace(p)
 	p = strings.Trim(p, `"`)
 	p = strings.Trim(p, `'`)
@@ -66,8 +71,8 @@ func NewModel() Model {
 	ti := textinput.New()
 	ti.Placeholder = `Paste folder or file path (e.g. C:/Users/User/Music/yt-glp)`
 	ti.Focus()
-	ti.CharLimit = 1000
-	ti.Width = 120 // Prevent visual text truncation
+	ti.CharLimit = 2000
+	ti.Width = 150
 
 	cwd, _ := os.Getwd()
 	ti.SetValue(cleanInputPath(cwd))
@@ -219,6 +224,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			m.PathInput, cmd = m.PathInput.Update(msg)
+			
+			// Sanitize value after input update
+			cleanedVal := cleanInputPath(m.PathInput.Value())
+			if cleanedVal != m.PathInput.Value() {
+				m.PathInput.SetValue(cleanedVal)
+			}
+
 			return m, cmd
 		}
 
