@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,7 +113,7 @@ func formatDuration(d time.Duration) string {
 
 func renderProgressBar(pct float64, width int) string {
 	if width <= 0 {
-		width = 30
+		width = 35
 	}
 	filledLen := int((pct / 100.0) * float64(width))
 	if filledLen > width {
