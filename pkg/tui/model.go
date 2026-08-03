@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,14 +55,21 @@ type ProcessDoneMsg struct {
 	Err        error
 }
 
+func cleanInputPath(p string) string {
+	p = strings.TrimSpace(p)
+	p = strings.Trim(p, `"`)
+	p = strings.Trim(p, `'`)
+	return filepath.ToSlash(p)
+}
+
 func NewModel() Model {
 	ti := textinput.New()
-	ti.Placeholder = `Paste folder or file path (e.g. C:\Videos\Interns)`
+	ti.Placeholder = `Paste folder or file path (e.g. C:/Users/User/Music/yt-glp)`
 	ti.Focus()
-	ti.CharLimit = 500
+	ti.CharLimit = 1000
 
 	cwd, _ := os.Getwd()
-	ti.SetValue(cwd)
+	ti.SetValue(cleanInputPath(cwd))
 
 	m := Model{
 		State:      StatePathInput,
@@ -165,8 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.State == StatePathInput {
 			switch rawKey {
 			case "enter":
-				val := strings.TrimSpace(m.PathInput.Value())
-				val = strings.Trim(val, `"`)
+				val := cleanInputPath(m.PathInput.Value())
 				if val == "" {
 					m.Err = fmt.Errorf("Please enter a valid directory or video file path")
 					return m, nil
@@ -245,15 +252,17 @@ func (m Model) startProcessing() tea.Cmd {
 			modelName = "realesr-animevideov3"
 		}
 
+		cleanPath := cleanInputPath(m.PathInput.Value())
+
 		opts := engine.UpscaleOptions{
-			TargetPath: strings.Trim(strings.TrimSpace(m.PathInput.Value()), `"`),
+			TargetPath: cleanPath,
 			Scale:      m.Scale,
 			ModelName:  modelName,
 			TargetFPS:  m.FPSTargets[m.FPSIdx],
 		}
 
 		resPath, err := m.Processor.ProcessPath(opts, func(bp engine.BatchProgress) {
-			// Real-time batch progress dispatch
+			// Progress
 		})
 
 		return ProcessDoneMsg{ResultPath: resPath, Err: err}
@@ -290,7 +299,7 @@ func (m Model) View() string {
 	case StateConfirmProcess:
 		s.WriteString(SubtitleStyle.Render("Confirm Batch AI Video Upscaling:") + "\n\n")
 		s.WriteString(fmt.Sprintf("Target Path:      %s\n", m.PathInput.Value()))
-		s.WriteString(fmt.Sprintf("Output Subfolder: %s\\upscale\\\n", strings.TrimRight(m.PathInput.Value(), `\/`)))
+		s.WriteString(fmt.Sprintf("Output Subfolder: %s/upscale/\n", strings.TrimRight(cleanInputPath(m.PathInput.Value()), `/`)))
 		s.WriteString(fmt.Sprintf("Scale Factor:     %dx\n", m.Scale))
 		s.WriteString(fmt.Sprintf("AI Model:         %s\n", m.Models[m.ModelIdx]))
 		s.WriteString(fmt.Sprintf("Target FPS:       %s\n\n", fpsText))
