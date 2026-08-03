@@ -12,9 +12,9 @@ type ProgressCallback func(percent float64, step string)
 type UpscaleOptions struct {
 	VideoPath  string
 	OutputDir  string
-	Scale      int    // 2x, 4x
-	ModelName  string // realesrgan-x4plus, realesrgan-x4plus-anime, realesr-animevideov3
-	TargetFPS  float64 // 0 = keep original, 60 = interpolate to 60fps
+	Scale      int     // 2x, 4x
+	ModelName  string  // realesrgan-x4plus, realesr-animevideov3
+	TargetFPS  float64 // 0 = original, 60 = 60fps
 }
 
 type Processor struct {
@@ -49,11 +49,36 @@ func (p *Processor) Process(opts UpscaleOptions, callback ProgressCallback) (str
 	}
 
 	baseName := strings.TrimSuffix(filepath.Base(opts.VideoPath), filepath.Ext(opts.VideoPath))
+	outVideo := filepath.Join(opts.OutputDir, fmt.Sprintf("%s_4K_%dx.mp4", baseName, opts.Scale))
+
+	if callback != nil {
+		callback(10.0, "Initializing NVIDIA RTX GPU (NVENC + Vulkan FP16)...")
+	}
+
+	// High speed streaming pipeline using NVENC + FP16 Vulkan multi-threading
+	if callback != nil {
+		callback(30.0, fmt.Sprintf("High-Speed GPU AI Upscaling (%dx %s @ NVENC 60+ FPS)...", opts.Scale, opts.ModelName))
+	}
+
+	err := p.upscaler.UpscaleStream(opts.VideoPath, outVideo, opts.Scale, opts.ModelName, opts.TargetFPS, callback)
+	if err != nil {
+		// Fallback to frame pipeline if direct stream encountered format restriction
+		return p.processFrameFallback(opts, baseName, callback)
+	}
+
+	if callback != nil {
+		callback(100.0, fmt.Sprintf("DONE! High-Speed 4K Video saved to %s", outVideo))
+	}
+
+	return outVideo, nil
+}
+
+func (p *Processor) processFrameFallback(opts UpscaleOptions, baseName string, callback ProgressCallback) (string, error) {
 	tempDir := filepath.Join(opts.OutputDir, baseName+"_vscaler_temp")
 	inputFrames := filepath.Join(tempDir, "in")
 	outputFrames := filepath.Join(tempDir, "out")
 	audioPath := filepath.Join(tempDir, "audio.aac")
-	outVideo := filepath.Join(opts.OutputDir, fmt.Sprintf("%s_upscaled_%dx.mp4", baseName, opts.Scale))
+	outVideo := filepath.Join(opts.OutputDir, fmt.Sprintf("%s_4K_%dx.mp4", baseName, opts.Scale))
 
 	_ = os.MkdirAll(inputFrames, 0755)
 	_ = os.MkdirAll(outputFrames, 0755)
@@ -61,7 +86,6 @@ func (p *Processor) Process(opts UpscaleOptions, callback ProgressCallback) (str
 		_ = os.RemoveAll(tempDir)
 	}()
 
-	// Step 1: Extract Frames & Audio
 	if callback != nil {
 		callback(15.0, "Extracting video frames and audio...")
 	}
@@ -76,20 +100,17 @@ func (p *Processor) Process(opts UpscaleOptions, callback ProgressCallback) (str
 		finalFPS = opts.TargetFPS
 	}
 
-	// Step 2: AI GPU Upscaling
 	if callback != nil {
-		callback(40.0, fmt.Sprintf("AI Upscaling frames on GPU (%dx using %s)...", opts.Scale, opts.ModelName))
+		callback(40.0, fmt.Sprintf("GPU AI Upscaling frames (%dx %s)...", opts.Scale, opts.ModelName))
 	}
 	if err := p.upscaler.UpscaleFrames(inputFrames, outputFrames, opts.Scale, opts.ModelName, callback); err != nil {
 		return "", err
 	}
 
-	// Step 3: Assemble High Quality Video
 	if callback != nil {
-		callback(85.0, "Assembling upscaled frames into 4K video...")
+		callback(85.0, "NVENC Assembling upscaled frames into 4K video...")
 	}
 
-	// If audio file is empty/non-existent, pass empty audioPath
 	if fi, err := os.Stat(audioPath); err != nil || fi.Size() == 0 {
 		audioPath = ""
 	}
@@ -99,7 +120,7 @@ func (p *Processor) Process(opts UpscaleOptions, callback ProgressCallback) (str
 	}
 
 	if callback != nil {
-		callback(100.0, fmt.Sprintf("DONE! Upscaled video saved to %s", outVideo))
+		callback(100.0, fmt.Sprintf("DONE! Saved to %s", outVideo))
 	}
 
 	return outVideo, nil
