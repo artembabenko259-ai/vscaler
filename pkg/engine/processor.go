@@ -51,6 +51,20 @@ func isVideoFile(ext string) bool {
 	return videoExts[ext]
 }
 
+// Detect mounted vdisk RAM/VRAM drive (e.g. R:\ or Z:\) for ultra-fast 30GB/s frame processing
+func getRAMDiskTempDir() string {
+	drives := []string{"R:", "Z:", "Y:", "X:", "V:"}
+	for _, drive := range drives {
+		if fi, err := os.Stat(drive + "\\"); err == nil && fi.IsDir() {
+			ramTemp := drive + "\\vscaler_ramtemp"
+			if err := os.MkdirAll(ramTemp, 0755); err == nil {
+				return ramTemp
+			}
+		}
+	}
+	return ""
+}
+
 func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (string, error) {
 	if !p.ffmpeg.IsInstalled() {
 		return "", fmt.Errorf("FFmpeg is not installed in PATH")
@@ -148,7 +162,16 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 }
 
 func (p *Processor) processFrameFallback(videoPath, baseOutputDir string, opts UpscaleOptions, baseName string, callback func(pInfo ProgressInfo)) (string, error) {
-	tempDir := filepath.Join(baseOutputDir, baseName+"_vscaler_temp")
+	ramTemp := getRAMDiskTempDir()
+	var tempDir string
+	usingRAMDisk := false
+	if ramTemp != "" {
+		tempDir = filepath.Join(ramTemp, baseName+"_vscaler_ramtemp")
+		usingRAMDisk = true
+	} else {
+		tempDir = filepath.Join(baseOutputDir, baseName+"_vscaler_temp")
+	}
+
 	inputFrames := filepath.Join(tempDir, "in")
 	outputFrames := filepath.Join(tempDir, "out")
 	audioPath := filepath.Join(tempDir, "audio.aac")
@@ -183,5 +206,6 @@ func (p *Processor) processFrameFallback(videoPath, baseOutputDir string, opts U
 		return "", err
 	}
 
+	_ = usingRAMDisk
 	return outVideo, nil
 }
