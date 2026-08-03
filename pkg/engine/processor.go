@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+type UpscaleOptions struct {
+	TargetPath string  // Can be a folder or a single video file
+	Scale      int     // 2x, 4x
+	ModelName  string  // realesrgan-x4plus, realesr-animevideov3
+	TargetFPS  float64 // 0 = original, 60 = 60fps
+}
+
 type BatchProgress struct {
 	CurrentFileIdx int
 	TotalFiles     int
@@ -32,6 +39,16 @@ func NewProcessor() *Processor {
 		ffmpeg:     NewFFmpeg(),
 		upscaler:   NewUpscaler(),
 	}
+}
+
+func isVideoFile(ext string) bool {
+	ext = strings.ToLower(ext)
+	videoExts := map[string]bool{
+		".mp4": true, ".mkv": true, ".mov": true, ".avi": true,
+		".webm": true, ".flv": true, ".wmv": true, ".m4v": true,
+		".3gp": true,
+	}
+	return videoExts[ext]
 }
 
 func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (string, error) {
@@ -79,7 +96,6 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 	}
 
 	totalFiles := len(videoFiles)
-	batchStartTime := time.Now()
 
 	for i, videoPath := range videoFiles {
 		baseName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
@@ -89,10 +105,7 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 
 		err := p.upscaler.UpscaleStreamWithProgress(videoPath, outVideo, opts.Scale, opts.ModelName, opts.TargetFPS, func(pInfo ProgressInfo) {
 			if callback != nil {
-				// Calculate overall batch ETA
-				elapsed := time.Since(batchStartTime)
 				fileElapsed := time.Since(fileStartTime)
-
 				callback(BatchProgress{
 					CurrentFileIdx: i + 1,
 					TotalFiles:     totalFiles,
@@ -120,7 +133,6 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 				}
 			})
 		}
-		_ = batchStartTime
 	}
 
 	if callback != nil {
