@@ -44,6 +44,8 @@ type Model struct {
 	ResultPath     string
 	Err            error
 
+	ProgressChan chan engine.BatchProgress
+
 	Width  int
 	Height int
 }
@@ -77,14 +79,15 @@ func NewModel() Model {
 	ti.SetValue(cleanInputPath(cwd))
 
 	m := Model{
-		State:      StatePathInput,
-		Processor:  engine.NewProcessor(),
-		PathInput:  ti,
-		Scale:      4,
-		Models:     []string{"realesrgan-x4plus (General Video)", "realesr-animevideov3 (Anime)"},
-		ModelIdx:   0,
-		FPSTargets: []float64{0.0, 60.0, 120.0},
-		FPSIdx:     0,
+		State:        StatePathInput,
+		Processor:    engine.NewProcessor(),
+		PathInput:    ti,
+		Scale:        4,
+		Models:       []string{"realesrgan-x4plus (General Video)", "realesr-animevideov3 (Anime)"},
+		ModelIdx:     0,
+		FPSTargets:   []float64{0.0, 60.0, 120.0},
+		FPSIdx:       0,
+		ProgressChan: make(chan engine.BatchProgress, 200),
 	}
 
 	return m
@@ -126,6 +129,16 @@ func (m Model) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+func listenForProgress(ch chan engine.BatchProgress) tea.Cmd {
+	return func() tea.Msg {
+		bp, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return BatchProgressMsg(bp)
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
@@ -145,6 +158,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Elapsed = msg.Elapsed
 		m.ETA = msg.ETA
 		m.StatusMsg = msg.StatusMsg
+
+		// Keep listening for next progress message
+		return m, listenForProgress(m.ProgressChan)
 
 	case ProcessDoneMsg:
 		if msg.Err != nil {
@@ -181,7 +197,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			// Dedicated Ctrl key combinations to change settings so normal typing is NEVER swallowed
 			switch lowerKey {
 			case "ctrl+c":
 				return m, tea.Quit
@@ -207,10 +222,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			// Pass ALL standard text characters directly to PathInput
 			m.PathInput, cmd = m.PathInput.Update(msg)
 			
-			// Sanitize path without stripping valid letters
 			cleanedVal := cleanInputPath(m.PathInput.Value())
 			if cleanedVal != m.PathInput.Value() {
 				m.PathInput.SetValue(cleanedVal)
@@ -224,13 +237,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch lowerKey {
 			case "y", "н":
 				m.State = StateProcessing
-				return m, m.startProcessing()
+				return m, tea.Batch(m.startProcessing(), listenForProgress(m.ProgressChan))
 			case "n", "т":
 				m.State = StatePathInput
 			}
 			if rawKey == "enter" {
 				m.State = StateProcessing
-				return m, m.startProcessing()
+				return m, tea.Batch(m.startProcessing(), listenForProgress(m.ProgressChan))
 			} else if rawKey == "esc" {
 				m.State = StatePathInput
 			}
@@ -263,7 +276,10 @@ func (m Model) startProcessing() tea.Cmd {
 		}
 
 		resPath, err := m.Processor.ProcessPath(opts, func(bp engine.BatchProgress) {
-			// Progress
+			select {
+			case m.ProgressChan <- bp:
+			default:
+			}
 		})
 
 		return ProcessDoneMsg{ResultPath: resPath, Err: err}
