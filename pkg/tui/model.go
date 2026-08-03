@@ -55,7 +55,6 @@ type ProcessDoneMsg struct {
 	Err        error
 }
 
-// Thoroughly clean and normalize pasted Windows paths (strip newlines, quotes, control chars, and backslashes)
 func cleanInputPath(p string) string {
 	p = strings.ReplaceAll(p, "\r", "")
 	p = strings.ReplaceAll(p, "\n", "")
@@ -89,25 +88,6 @@ func NewModel() Model {
 	}
 
 	return m
-}
-
-func normalizeKey(k string) string {
-	k = strings.ToLower(k)
-	switch k {
-	case "s", "ы":
-		return "s"
-	case "m", "ь":
-		return "m"
-	case "f", "а":
-		return "f"
-	case "q", "й":
-		return "q"
-	case "y", "н":
-		return "y"
-	case "n", "т":
-		return "n"
-	}
-	return k
 }
 
 func formatDuration(d time.Duration) string {
@@ -177,7 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		rawKey := msg.String()
-		key := normalizeKey(rawKey)
+		lowerKey := strings.ToLower(rawKey)
 
 		if m.State == StatePathInput {
 			switch rawKey {
@@ -194,12 +174,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "esc":
 				return m, tea.Quit
+
+			case "tab":
+				m.ModelIdx = (m.ModelIdx + 1) % len(m.Models)
+				m.StatusMsg = fmt.Sprintf("AI Model set to %s", m.Models[m.ModelIdx])
+				return m, nil
 			}
 
-			switch key {
+			// Dedicated Ctrl key combinations to change settings so normal typing is NEVER swallowed
+			switch lowerKey {
 			case "ctrl+c":
 				return m, tea.Quit
-			case "s":
+			case "ctrl+s":
 				if m.Scale == 4 {
 					m.Scale = 2
 				} else {
@@ -207,13 +193,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.StatusMsg = fmt.Sprintf("Scale set to %dx", m.Scale)
 				return m, nil
-
-			case "m":
+			case "ctrl+m":
 				m.ModelIdx = (m.ModelIdx + 1) % len(m.Models)
 				m.StatusMsg = fmt.Sprintf("AI Model set to %s", m.Models[m.ModelIdx])
 				return m, nil
-
-			case "f":
+			case "ctrl+f":
 				m.FPSIdx = (m.FPSIdx + 1) % len(m.FPSTargets)
 				fpsText := "Original"
 				if m.FPSTargets[m.FPSIdx] > 0 {
@@ -223,9 +207,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			// Pass ALL standard text characters directly to PathInput
 			m.PathInput, cmd = m.PathInput.Update(msg)
 			
-			// Sanitize value after input update
+			// Sanitize path without stripping valid letters
 			cleanedVal := cleanInputPath(m.PathInput.Value())
 			if cleanedVal != m.PathInput.Value() {
 				m.PathInput.SetValue(cleanedVal)
@@ -236,11 +221,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.State {
 		case StateConfirmProcess:
-			switch key {
-			case "y":
+			switch lowerKey {
+			case "y", "н":
 				m.State = StateProcessing
 				return m, m.startProcessing()
-			case "n":
+			case "n", "т":
 				m.State = StatePathInput
 			}
 			if rawKey == "enter" {
@@ -310,7 +295,7 @@ func (m Model) View() string {
 	case StatePathInput:
 		s.WriteString(SubtitleStyle.Render("Enter or paste Target Folder / Video File Path:") + "\n\n")
 		s.WriteString(m.PathInput.View() + "\n\n")
-		s.WriteString(HelpStyle.Render("[Enter] Process    [S] Scale (2x/4x)    [M] Model    [F] FPS    [Esc] Exit"))
+		s.WriteString(HelpStyle.Render("[Enter] Process    [Tab] Switch Model    [Ctrl+S] Scale    [Ctrl+F] FPS    [Esc] Exit"))
 
 	case StateConfirmProcess:
 		s.WriteString(SubtitleStyle.Render("Confirm Batch AI Video Upscaling:") + "\n\n")
