@@ -13,9 +13,6 @@ import (
 
 type ProgressInfo struct {
 	Percent   float64
-	Current   int
-	Total     int
-	FPS       float64
 	Elapsed   time.Duration
 	ETA       time.Duration
 	StatusMsg string
@@ -31,7 +28,7 @@ func NewUpscaler() *Upscaler {
 	}
 }
 
-func (u *Upscaler) UpscaleStreamWithProgress(inputVideo, outputVideo string, scale int, modelName string, targetFPS float64, progressCallback func(info ProgressInfo)) error {
+func (u *Upscaler) UpscaleFramesWithProgress(inputDir, outputDir string, scale int, modelName string, progressCallback func(info ProgressInfo)) error {
 	exePath, err := u.downloader.GetExePath()
 	if err != nil {
 		return err
@@ -47,19 +44,15 @@ func (u *Upscaler) UpscaleStreamWithProgress(inputVideo, outputVideo string, sca
 	modelsDir := filepath.Dir(exePath)
 
 	cmd := exec.Command(exePath,
-		"-i", inputVideo,
-		"-o", outputVideo,
+		"-i", inputDir,
+		"-o", outputDir,
 		"-s", fmt.Sprintf("%d", scale),
 		"-n", modelName,
 		"-m", filepath.Join(modelsDir, "models"),
 		"-g", "0",     // NVIDIA RTX GPU
-		"-j", "2:2:2", // Multi-threaded Vulkan
+		"-j", "2:2:2", // Vulkan Multi-threaded GPU saturation
 	)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return cmd.Run()
-	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return cmd.Run()
@@ -71,8 +64,8 @@ func (u *Upscaler) UpscaleStreamWithProgress(inputVideo, outputVideo string, sca
 
 	startTime := time.Now()
 
-	// Read output lines to parse real-time percentages
-	parseOutput := func(r io.Reader) {
+	// Parse real-time progress percentages (e.g. 15.20%)
+	go func(r io.Reader) {
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -98,16 +91,12 @@ func (u *Upscaler) UpscaleStreamWithProgress(inputVideo, outputVideo string, sca
 				}
 			}
 		}
-	}
-
-	go parseOutput(stdout)
-	go parseOutput(stderr)
+	}(stderr)
 
 	return cmd.Wait()
 }
 
 func parsePercent(line string) float64 {
-	// Lines look like: "45.20%" or "0.15%"
 	idx := strings.Index(line, "%")
 	if idx > 0 {
 		start := idx - 1
@@ -120,32 +109,4 @@ func parsePercent(line string) float64 {
 		}
 	}
 	return 0
-}
-
-func (u *Upscaler) UpscaleFrames(inputDir, outputDir string, scale int, modelName string, progressCallback func(info ProgressInfo)) error {
-	exePath, err := u.downloader.GetExePath()
-	if err != nil {
-		return err
-	}
-
-	if scale <= 0 {
-		scale = 4
-	}
-	if modelName == "" {
-		modelName = "realesrgan-x4plus"
-	}
-
-	modelsDir := filepath.Dir(exePath)
-
-	cmd := exec.Command(exePath,
-		"-i", inputDir,
-		"-o", outputDir,
-		"-s", fmt.Sprintf("%d", scale),
-		"-n", modelName,
-		"-m", filepath.Join(modelsDir, "models"),
-		"-g", "0",
-		"-j", "2:2:2",
-	)
-
-	return cmd.Run()
 }

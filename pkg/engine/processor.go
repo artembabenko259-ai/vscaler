@@ -51,7 +51,6 @@ func isVideoFile(ext string) bool {
 	return videoExts[ext]
 }
 
-// Detect mounted vdisk RAM/VRAM drive (e.g. R:\ or Z:\) for ultra-fast 30GB/s frame processing
 func getRAMDiskTempDir() string {
 	drives := []string{"R:", "Z:", "Y:", "X:", "V:"}
 	for _, drive := range drives {
@@ -78,7 +77,8 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 		return "", fmt.Errorf("failed to initialize AI engine: %v", err)
 	}
 
-	info, err := os.Stat(opts.TargetPath)
+	cleanPath := filepath.ToSlash(strings.Trim(strings.TrimSpace(opts.TargetPath), `"`))
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		return "", fmt.Errorf("target path does not exist: %v", err)
 	}
@@ -87,22 +87,22 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 	var baseOutputDir string
 
 	if info.IsDir() {
-		baseOutputDir = filepath.Join(opts.TargetPath, "upscale")
-		entries, err := os.ReadDir(opts.TargetPath)
+		baseOutputDir = filepath.Join(cleanPath, "upscale")
+		entries, err := os.ReadDir(cleanPath)
 		if err != nil {
 			return "", err
 		}
 		for _, entry := range entries {
 			if !entry.IsDir() && isVideoFile(filepath.Ext(entry.Name())) {
-				videoFiles = append(videoFiles, filepath.Join(opts.TargetPath, entry.Name()))
+				videoFiles = append(videoFiles, filepath.Join(cleanPath, entry.Name()))
 			}
 		}
 		if len(videoFiles) == 0 {
-			return "", fmt.Errorf("no video files (.mp4, .mkv, .mov, .avi) found in directory %s", opts.TargetPath)
+			return "", fmt.Errorf("no video files (.mp4, .mkv, .mov, .webm) found in directory %s", cleanPath)
 		}
 	} else {
-		baseOutputDir = filepath.Join(filepath.Dir(opts.TargetPath), "upscale")
-		videoFiles = append(videoFiles, opts.TargetPath)
+		baseOutputDir = filepath.Join(filepath.Dir(cleanPath), "upscale")
+		videoFiles = append(videoFiles, cleanPath)
 	}
 
 	if err := os.MkdirAll(baseOutputDir, 0755); err != nil {
@@ -117,7 +117,56 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 
 		fileStartTime := time.Now()
 
-		err := p.upscaler.UpscaleStreamWithProgress(videoPath, outVideo, opts.Scale, opts.ModelName, opts.TargetFPS, func(pInfo ProgressInfo) {
+		ramTemp := getRAMDiskTempDir()
+		var tempDir string
+		if ramTemp != "" {
+			tempDir = filepath.Join(ramTemp, baseName+"_vscaler_temp")
+		} else {
+			tempDir = filepath.Join(baseOutputDir, baseName+"_vscaler_temp")
+		}
+
+		inputFrames := filepath.Join(tempDir, "in")
+		outputFrames := filepath.Join(tempDir, "out")
+		audioPath := filepath.Join(tempDir, "audio.aac")
+
+		_ = os.MkdirAll(inputFrames, 0755)
+		_ = os.MkdirAll(outputFrames, 0755)
+
+		// Step 1: Extract Frames & Audio
+		if callback != nil {
+			callback(BatchProgress{
+				CurrentFileIdx: i + 1,
+				TotalFiles:     totalFiles,
+				CurrentFile:    filepath.Base(videoPath),
+				Percent:        5.0,
+				StatusMsg:      "Extracting video frames and audio...",
+			})
+		}
+
+		if err := p.ffmpeg.ExtractFrames(videoPath, inputFrames); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return "", fmt.Errorf("failed to extract frames: %v", err)
+		}
+		_ = p.ffmpeg.ExtractAudio(videoPath, audioPath)
+
+		origFPS, _ := p.ffmpeg.GetVideoFPS(videoPath)
+		finalFPS := origFPS
+		if opts.TargetFPS > 0 {
+			finalFPS = opts.TargetFPS
+		}
+
+		// Step 2: GPU AI Frame Upscaling with Real-Time ETA
+		if callback != nil {
+			callback(BatchProgress{
+				CurrentFileIdx: i + 1,
+				TotalFiles:     totalFiles,
+				CurrentFile:    filepath.Base(videoPath),
+				Percent:        10.0,
+				StatusMsg:      fmt.Sprintf("AI GPU Upscaling on RTX 5060 (%dx %s)...", opts.Scale, opts.ModelName),
+			})
+		}
+
+		err = p.upscaler.UpscaleFramesWithProgress(inputFrames, outputFrames, opts.Scale, opts.ModelName, func(pInfo ProgressInfo) {
 			if callback != nil {
 				fileElapsed := time.Since(fileStartTime)
 				callback(BatchProgress{
@@ -127,26 +176,37 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 					Percent:        pInfo.Percent,
 					Elapsed:        fileElapsed,
 					ETA:            pInfo.ETA,
-					StatusMsg:      fmt.Sprintf("Processing %s (%d/%d)...", filepath.Base(videoPath), i+1, totalFiles),
+					StatusMsg:      fmt.Sprintf("AI Upscaling %s (%d/%d)...", filepath.Base(videoPath), i+1, totalFiles),
 				})
 			}
 		})
 
 		if err != nil {
-			_, _ = p.processFrameFallback(videoPath, baseOutputDir, opts, baseName, func(pInfo ProgressInfo) {
-				if callback != nil {
-					callback(BatchProgress{
-						CurrentFileIdx: i + 1,
-						TotalFiles:     totalFiles,
-						CurrentFile:    filepath.Base(videoPath),
-						Percent:        pInfo.Percent,
-						Elapsed:        time.Since(fileStartTime),
-						ETA:            pInfo.ETA,
-						StatusMsg:      fmt.Sprintf("Fallback Processing %s (%d/%d)...", filepath.Base(videoPath), i+1, totalFiles),
-					})
-				}
+			_ = os.RemoveAll(tempDir)
+			return "", fmt.Errorf("AI upscaler failed: %v", err)
+		}
+
+		// Step 3: NVENC Video Assembly
+		if callback != nil {
+			callback(BatchProgress{
+				CurrentFileIdx: i + 1,
+				TotalFiles:     totalFiles,
+				CurrentFile:    filepath.Base(videoPath),
+				Percent:        90.0,
+				StatusMsg:      "NVENC Assembling upscaled frames into 4K video...",
 			})
 		}
+
+		if fi, err := os.Stat(audioPath); err != nil || fi.Size() == 0 {
+			audioPath = ""
+		}
+
+		if err := p.ffmpeg.AssembleVideo(outputFrames, audioPath, outVideo, finalFPS); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return "", fmt.Errorf("failed to assemble video: %v", err)
+		}
+
+		_ = os.RemoveAll(tempDir)
 	}
 
 	if callback != nil {
@@ -159,53 +219,4 @@ func (p *Processor) ProcessPath(opts UpscaleOptions, callback BatchCallback) (st
 	}
 
 	return baseOutputDir, nil
-}
-
-func (p *Processor) processFrameFallback(videoPath, baseOutputDir string, opts UpscaleOptions, baseName string, callback func(pInfo ProgressInfo)) (string, error) {
-	ramTemp := getRAMDiskTempDir()
-	var tempDir string
-	usingRAMDisk := false
-	if ramTemp != "" {
-		tempDir = filepath.Join(ramTemp, baseName+"_vscaler_ramtemp")
-		usingRAMDisk = true
-	} else {
-		tempDir = filepath.Join(baseOutputDir, baseName+"_vscaler_temp")
-	}
-
-	inputFrames := filepath.Join(tempDir, "in")
-	outputFrames := filepath.Join(tempDir, "out")
-	audioPath := filepath.Join(tempDir, "audio.aac")
-	outVideo := filepath.Join(baseOutputDir, fmt.Sprintf("%s_4K_%dx.mp4", baseName, opts.Scale))
-
-	_ = os.MkdirAll(inputFrames, 0755)
-	_ = os.MkdirAll(outputFrames, 0755)
-	defer func() {
-		_ = os.RemoveAll(tempDir)
-	}()
-
-	if err := p.ffmpeg.ExtractFrames(videoPath, inputFrames); err != nil {
-		return "", err
-	}
-	_ = p.ffmpeg.ExtractAudio(videoPath, audioPath)
-
-	origFPS, _ := p.ffmpeg.GetVideoFPS(videoPath)
-	finalFPS := origFPS
-	if opts.TargetFPS > 0 {
-		finalFPS = opts.TargetFPS
-	}
-
-	if err := p.upscaler.UpscaleFrames(inputFrames, outputFrames, opts.Scale, opts.ModelName, callback); err != nil {
-		return "", err
-	}
-
-	if fi, err := os.Stat(audioPath); err != nil || fi.Size() == 0 {
-		audioPath = ""
-	}
-
-	if err := p.ffmpeg.AssembleVideo(outputFrames, audioPath, outVideo, finalFPS); err != nil {
-		return "", err
-	}
-
-	_ = usingRAMDisk
-	return outVideo, nil
 }

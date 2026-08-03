@@ -67,6 +67,7 @@ func NewModel() Model {
 	ti.Placeholder = `Paste folder or file path (e.g. C:/Users/User/Music/yt-glp)`
 	ti.Focus()
 	ti.CharLimit = 1000
+	ti.Width = 120 // Prevent visual text truncation
 
 	cwd, _ := os.Getwd()
 	ti.SetValue(cleanInputPath(cwd))
@@ -147,6 +148,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
+		if msg.Width > 20 {
+			m.PathInput.Width = msg.Width - 10
+		}
 
 	case BatchProgressMsg:
 		m.CurrentFileIdx = msg.CurrentFileIdx
