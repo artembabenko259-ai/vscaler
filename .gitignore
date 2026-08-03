@@ -1,0 +1,9 @@
+# Binaries & Executables
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Temp files
+*.temp
+*_temp/
